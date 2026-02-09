@@ -1,0 +1,2 @@
+C:\Users\USER\Desktop\RawPrintService\bin\Release\net9.0\win-x64\publish\RawPrintService.pdb
+C:\Users\USER\Desktop\RawPrintService\bin\Release\net9.0\win-x64\publish\RawPrintService.exe
