@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("RawPrintService")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+6835ee1f387766aa07dd20a3b138e51ad95a3e7c")]
 [assembly: System.Reflection.AssemblyProductAttribute("RawPrintService")]
 [assembly: System.Reflection.AssemblyTitleAttribute("RawPrintService")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

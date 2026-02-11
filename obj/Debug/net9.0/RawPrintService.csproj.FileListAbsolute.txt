@@ -46,3 +46,4 @@ C:\Users\USER\Desktop\RawPrintService\bin\Debug\net9.0\runtimes\win\lib\net9.0\S
 C:\Users\USER\Desktop\RawPrintService\bin\Debug\net9.0\System.CodeDom.dll
 C:\Users\USER\Desktop\RawPrintService\bin\Debug\net9.0\System.Management.dll
 C:\Users\USER\Desktop\RawPrintService\bin\Debug\net9.0\runtimes\win\lib\net9.0\System.Management.dll
+C:\Users\USER\Desktop\RawPrintService\obj\Debug\net9.0\RawPrintService.sourcelink.json

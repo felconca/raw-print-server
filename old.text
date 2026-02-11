@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -11,9 +11,6 @@ using System.Diagnostics;
 using System.Text;
 using System.IO.Ports;
 using System.Management;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.IO;
 
 namespace RawPrint
 {
@@ -131,77 +128,6 @@ namespace RawPrint
                         }
                     }
                 }
-                else if (ctx.Request.Url.AbsolutePath == "/print-image" && ctx.Request.HttpMethod == "POST")
-                {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
-                    {
-                        var body = reader.ReadToEnd();
-
-                        try
-                        {
-                            // Parse as JsonDocument instead of Dictionary
-                            using (JsonDocument jsonDoc = JsonDocument.Parse(body))
-                            {
-                                var root = jsonDoc.RootElement;
-
-                                if (!root.TryGetProperty("printer", out var printerElement) ||
-                                    !root.TryGetProperty("image", out var imageElement))
-                                {
-                                    WriteResponse(ctx, "{\"error\":\"Missing printer or image data\"}", "application/json");
-                                    return;
-                                }
-
-                                var printerName = printerElement.GetString();
-                                var imageBase64 = imageElement.GetString();
-                                var fitToPage = root.TryGetProperty("fitToPage", out var fitElement)
-                                    ? fitElement.GetBoolean()
-                                    : true;
-
-                                byte[] imageBytes = Convert.FromBase64String(imageBase64);
-                                using (var ms = new MemoryStream(imageBytes))
-                                {
-                                    using (var img = Image.FromStream(ms))
-                                    {
-                                        PrintImage(printerName, img, fitToPage);
-                                    }
-                                }
-                                WriteResponse(ctx, "{\"status\":\"image sent to printer\"}", "application/json");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
-                        }
-                    }
-                }
-                else if (ctx.Request.Url.AbsolutePath == "/print-pdf" && ctx.Request.HttpMethod == "POST")
-                {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
-                    {
-                        var body = reader.ReadToEnd();
-                        var doc = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-
-                        if (!doc.ContainsKey("printer") || !doc.ContainsKey("pdf"))
-                        {
-                            WriteResponse(ctx, "{\"error\":\"Missing printer or pdf data\"}", "application/json");
-                            return;
-                        }
-
-                        var printerName = doc["printer"];
-                        var pdfBase64 = doc["pdf"];
-
-                        try
-                        {
-                            byte[] pdfBytes = Convert.FromBase64String(pdfBase64);
-                            PrintPdf(printerName, pdfBytes);
-                            WriteResponse(ctx, "{\"status\":\"pdf sent to printer\"}", "application/json");
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
-                        }
-                    }
-                }
                 else if (ctx.Request.Url.AbsolutePath == "/status" && ctx.Request.HttpMethod == "POST")
                 {
                     using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
@@ -240,6 +166,7 @@ namespace RawPrint
                         {
                             string result = PrintTestPage(printerName);
 
+                            // Proper JSON response
                             var json = JsonSerializer.Serialize(new
                             {
                                 status = "ok",
@@ -272,136 +199,6 @@ namespace RawPrint
             finally
             {
                 ctx.Response.OutputStream.Close();
-            }
-        }
-
-        // ---------- IMAGE PRINTING ----------
-        private void PrintImage(string printerName, Image image, bool fitToPage)
-        {
-            PrintDocument pd = new PrintDocument();
-            pd.PrinterSettings.PrinterName = printerName;
-
-            pd.PrintPage += (sender, e) =>
-            {
-                if (fitToPage)
-                {
-                    // Scale image to fit page while maintaining aspect ratio
-                    float pageWidth = e.MarginBounds.Width;
-                    float pageHeight = e.MarginBounds.Height;
-                    float imageWidth = image.Width;
-                    float imageHeight = image.Height;
-
-                    float scaleX = pageWidth / imageWidth;
-                    float scaleY = pageHeight / imageHeight;
-                    float scale = Math.Min(scaleX, scaleY);
-
-                    float scaledWidth = imageWidth * scale;
-                    float scaledHeight = imageHeight * scale;
-
-                    float x = e.MarginBounds.Left + (pageWidth - scaledWidth) / 2;
-                    float y = e.MarginBounds.Top + (pageHeight - scaledHeight) / 2;
-
-                    e.Graphics.DrawImage(image, x, y, scaledWidth, scaledHeight);
-                }
-                else
-                {
-                    // Print at actual size
-                    e.Graphics.DrawImage(image, e.MarginBounds.Left, e.MarginBounds.Top);
-                }
-            };
-
-            pd.Print();
-        }
-
-        // ---------- PDF PRINTING ----------
-        private void PrintPdf(string printerName, byte[] pdfBytes)
-        {
-            // Save PDF to temp file
-            string tempPdfPath = Path.Combine(Path.GetTempPath(), $"print_{Guid.NewGuid()}.pdf");
-            File.WriteAllBytes(tempPdfPath, pdfBytes);
-
-            try
-            {
-                // Use Adobe Reader or default PDF viewer to print
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = tempPdfPath,
-                    Verb = "print",
-                    Arguments = $"/p /h \"{tempPdfPath}\"",
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    UseShellExecute = true
-                };
-
-                // Alternative: Use SumatraPDF if installed (more reliable)
-                string sumatraPath = @"C:\Program Files\SumatraPDF\SumatraPDF.exe";
-                if (File.Exists(sumatraPath))
-                {
-                    psi.FileName = sumatraPath;
-                    psi.Arguments = $"-print-to \"{printerName}\" \"{tempPdfPath}\"";
-                    psi.UseShellExecute = false;
-                }
-
-                using (Process p = Process.Start(psi))
-                {
-                    if (p != null && !p.HasExited)
-                    {
-                        p.WaitForExit(10000); // Wait up to 10 seconds
-                    }
-                }
-
-                // Wait a bit before deleting temp file
-                Thread.Sleep(2000);
-            }
-            finally
-            {
-                // Clean up temp file
-                try
-                {
-                    if (File.Exists(tempPdfPath))
-                        File.Delete(tempPdfPath);
-                }
-                catch { }
-            }
-        }
-
-        // Alternative PDF printing using GhostScript (requires GhostScript installed)
-        private void PrintPdfWithGhostScript(string printerName, byte[] pdfBytes)
-        {
-            string tempPdfPath = Path.Combine(Path.GetTempPath(), $"print_{Guid.NewGuid()}.pdf");
-            File.WriteAllBytes(tempPdfPath, pdfBytes);
-
-            try
-            {
-                string gsPath = @"C:\Program Files\gs\gs9.56.1\bin\gswin64c.exe";
-
-                if (!File.Exists(gsPath))
-                {
-                    throw new Exception("GhostScript not found. Please install GhostScript.");
-                }
-
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = gsPath,
-                    Arguments = $"-dPrinted -dBATCH -dNOPAUSE -dNOSAFER -q -dNumCopies=1 -sDEVICE=mswinpr2 -sOutputFile=\"%printer%{printerName}\" \"{tempPdfPath}\"",
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    UseShellExecute = false
-                };
-
-                using (Process p = Process.Start(psi))
-                {
-                    p.WaitForExit(30000);
-                }
-            }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(tempPdfPath))
-                        File.Delete(tempPdfPath);
-                }
-                catch { }
             }
         }
 
@@ -456,6 +253,7 @@ namespace RawPrint
             }
         }
 
+        // Helper to get local IPv4 address
         private string GetLocalIPAddress()
         {
             string localIP = "Unknown";
@@ -546,6 +344,7 @@ namespace RawPrint
 
             System.Runtime.InteropServices.Marshal.FreeCoTaskMem(unmanagedPointer);
 
+            // 🔹 Poll spooler until the printer has no jobs left
             WaitForPrinterQueueToEmpty(printerName);
         }
 
@@ -568,7 +367,7 @@ namespace RawPrint
                         }
 
                         if (hasJobs)
-                            Thread.Sleep(1000);
+                            Thread.Sleep(1000); // wait 1s before checking again
 
                     } while (hasJobs);
                 }
@@ -579,6 +378,8 @@ namespace RawPrint
             }
         }
 
+
+        // ---------- ESC/POS STATUS ----------
         private string CheckPrinterStatus(string portName)
         {
             try
@@ -588,7 +389,7 @@ namespace RawPrint
                     serial.ReadTimeout = 2000;
                     serial.Open();
 
-                    byte[] statusCmd = new byte[] { 0x10, 0x04, 0x01 };
+                    byte[] statusCmd = new byte[] { 0x10, 0x04, 0x01 }; // DLE EOT 1
                     serial.Write(statusCmd, 0, statusCmd.Length);
 
                     int statusByte = serial.ReadByte();
