@@ -1,11 +1,13 @@
 {
   "version": 2,
-  "dgSpecHash": "S9i/5zAXTPs=",
+  "dgSpecHash": "P4TAbBpkY/0=",
   "success": true,
   "projectFilePath": "C:\\Users\\USER\\Desktop\\RawPrintService\\RawPrintService.csproj",
   "expectedPackageFiles": [
+    "C:\\Users\\USER\\.nuget\\packages\\microsoft.web.webview2\\1.0.3719.77\\microsoft.web.webview2.1.0.3719.77.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\microsoft.win32.systemevents\\9.0.9\\microsoft.win32.systemevents.9.0.9.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\newtonsoft.json\\13.0.4\\newtonsoft.json.13.0.4.nupkg.sha512",
+    "C:\\Users\\USER\\.nuget\\packages\\pdfiumviewer.updated\\2.14.5\\pdfiumviewer.updated.2.14.5.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\runtime.android-arm.runtime.native.system.io.ports\\9.0.9\\runtime.android-arm.runtime.native.system.io.ports.9.0.9.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\runtime.android-arm64.runtime.native.system.io.ports\\9.0.9\\runtime.android-arm64.runtime.native.system.io.ports.9.0.9.nupkg.sha512",
     "C:\\Users\\USER\\.nuget\\packages\\runtime.android-x64.runtime.native.system.io.ports\\9.0.9\\runtime.android-x64.runtime.native.system.io.ports.9.0.9.nupkg.sha512",

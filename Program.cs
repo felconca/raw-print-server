@@ -14,6 +14,9 @@ using System.Management;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
+using Microsoft.Web.WebView2.Core;
 
 namespace RawPrint
 {
@@ -44,7 +47,7 @@ namespace RawPrint
             try
             {
                 _listener = new HttpListener();
-                _listener.Prefixes.Add("http://+:9100/");
+                _listener.Prefixes.Add("http://+:8100/");
                 _listener.Start();
 
                 while (!token.IsCancellationRequested)
@@ -63,8 +66,15 @@ namespace RawPrint
         {
             try
             {
+                // Normalize path - fix trailing slash and case issues
+                string path = ctx.Request.Url.AbsolutePath.TrimEnd('/').ToLower();
+                string method = ctx.Request.HttpMethod.ToUpper();
+
+                // Debug log
+                Console.WriteLine($"[REQUEST] {method} {path}");
+
                 // Handle preflight CORS
-                if (ctx.Request.HttpMethod == "OPTIONS")
+                if (method == "OPTIONS")
                 {
                     ctx.Response.AppendHeader("Access-Control-Allow-Origin", "*");
                     ctx.Response.AppendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -74,7 +84,7 @@ namespace RawPrint
                     return;
                 }
 
-                if (ctx.Request.Url.AbsolutePath == "/")
+                if (path == "" || path == "/")
                 {
                     var computer = Environment.MachineName;
                     var ip = Dns.GetHostAddresses(computer)
@@ -92,9 +102,9 @@ namespace RawPrint
                     string json = JsonSerializer.Serialize(response, new JsonSerializerOptions { WriteIndented = true });
                     WriteResponse(ctx, json, "application/json");
                 }
-                else if (ctx.Request.Url.AbsolutePath == "/print" && ctx.Request.HttpMethod == "POST")
+                else if (path == "/print" && method == "POST")
                 {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
                     {
                         var body = reader.ReadToEnd();
                         var doc = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
@@ -112,15 +122,10 @@ namespace RawPrint
                         try
                         {
                             byte[] bytes;
-
                             if (encoding.ToLower() == "base64")
-                            {
                                 bytes = Convert.FromBase64String(data);
-                            }
                             else
-                            {
                                 bytes = Encoding.ASCII.GetBytes(data);
-                            }
 
                             PrintRawBytes(printerName, bytes);
                             WriteResponse(ctx, "{\"status\":\"sent to printer\"}", "application/json");
@@ -131,15 +136,14 @@ namespace RawPrint
                         }
                     }
                 }
-                else if (ctx.Request.Url.AbsolutePath == "/print-image" && ctx.Request.HttpMethod == "POST")
+                else if (path == "/print-image" && method == "POST")
                 {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
                     {
                         var body = reader.ReadToEnd();
 
                         try
                         {
-                            // Parse as JsonDocument instead of Dictionary
                             using (JsonDocument jsonDoc = JsonDocument.Parse(body))
                             {
                                 var root = jsonDoc.RootElement;
@@ -153,19 +157,182 @@ namespace RawPrint
 
                                 var printerName = printerElement.GetString();
                                 var imageBase64 = imageElement.GetString();
+
                                 var fitToPage = root.TryGetProperty("fitToPage", out var fitElement)
-                                    ? fitElement.GetBoolean()
-                                    : true;
+                                    ? fitElement.GetBoolean() : true;
+
+                                float widthInches = root.TryGetProperty("widthInches", out var wElement)
+                                    ? (float)wElement.GetDouble() : 0;
+                                float heightInches = root.TryGetProperty("heightInches", out var hElement)
+                                    ? (float)hElement.GetDouble() : 0;
 
                                 byte[] imageBytes = Convert.FromBase64String(imageBase64);
                                 using (var ms = new MemoryStream(imageBytes))
+                                using (var img = Image.FromStream(ms))
                                 {
-                                    using (var img = Image.FromStream(ms))
-                                    {
-                                        PrintImage(printerName, img, fitToPage);
-                                    }
+                                    PrintImage(printerName, img, fitToPage, widthInches, heightInches);
                                 }
+
                                 WriteResponse(ctx, "{\"status\":\"image sent to printer\"}", "application/json");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[ERROR] print-image: {ex.Message}");
+                            WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
+                        }
+                    }
+                }
+                else if (path == "/print-pdf" && method == "POST")
+                {
+                    using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    {
+                        var body = reader.ReadToEnd();
+
+                        try
+                        {
+                            using (JsonDocument jsonDoc = JsonDocument.Parse(body))
+                            {
+                                var root = jsonDoc.RootElement;
+
+                                if (!root.TryGetProperty("printer", out var printerElement) ||
+                                    !root.TryGetProperty("pdf", out var pdfElement))
+                                {
+                                    WriteResponse(ctx, "{\"error\":\"Missing printer or pdf data\"}", "application/json");
+                                    return;
+                                }
+
+                                var printerName = printerElement.GetString();
+                                var pdfPath = pdfElement.GetString();
+
+                                if (!File.Exists(pdfPath))
+                                {
+                                    WriteResponse(ctx, "{\"error\":\"PDF file not found\"}", "application/json");
+                                    return;
+                                }
+
+                                PrintPdf(printerName, pdfPath);
+
+                                WriteResponse(ctx, "{\"status\":\"pdf sent to printer\"}", "application/json");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[ERROR] print-pdf: {ex.Message}");
+                            WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
+                        }
+                    }
+                }
+                // else if (path == "/print-html" && method == "POST")
+                // {
+                //     using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                //     {
+                //         var body = reader.ReadToEnd();
+
+                //         try
+                //         {
+                //             using (JsonDocument jsonDoc = JsonDocument.Parse(body))
+                //             {
+                //                 var root = jsonDoc.RootElement;
+
+                //                 if (!root.TryGetProperty("printer", out var printerElement) ||
+                //                     !root.TryGetProperty("html", out var htmlElement))
+                //                 {
+                //                     WriteResponse(ctx, "{\"error\":\"Missing printer or html\"}", "application/json");
+                //                     return;
+                //                 }
+
+                //                 var printerName = printerElement.GetString();
+                //                 var htmlContent = htmlElement.GetString();
+
+                //                 PrintHtml(printerName, htmlContent);
+
+                //                 WriteResponse(ctx, "{\"status\":\"html sent to printer\"}", "application/json");
+                //             }
+                //         }
+                //         catch (Exception ex)
+                //         {
+                //             WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
+                //         }
+                //     }
+                // }
+
+                else if (path == "/print-html" && method == "POST")
+                {
+                    using (var reader = new StreamReader(ctx.Request.InputStream,
+                        ctx.Request.ContentEncoding))
+                    {
+                        var body = reader.ReadToEnd();
+
+                        try
+                        {
+                            using (JsonDocument jsonDoc = JsonDocument.Parse(body))
+                            {
+                                var root = jsonDoc.RootElement;
+
+                                if (!root.TryGetProperty("printer", out var printerEl) ||
+                                    !root.TryGetProperty("html", out var htmlEl))
+                                {
+                                    WriteResponse(ctx,
+                                        "{\"error\":\"Missing printer or html\"}",
+                                        "application/json");
+                                    return;
+                                }
+
+                                var printerName = printerEl.GetString();
+                                var html = htmlEl.GetString();
+
+                                float widthInches = root.TryGetProperty("widthInches", out var wEl)
+                                    ? (float)wEl.GetDouble() : 8.5f;
+                                float heightInches = root.TryGetProperty("heightInches", out var hEl)
+                                    ? (float)hEl.GetDouble() : 5.5f;
+
+                                // DPI settings for dot matrix
+                                // dpiX: horizontal DPI (default 240)
+                                // dpiY: vertical DPI (default 72)
+                                int dpiX = root.TryGetProperty("dpiX", out var dxEl)
+                                    ? dxEl.GetInt32() : 240;
+                                int dpiY = root.TryGetProperty("dpiY", out var dyEl)
+                                    ? dyEl.GetInt32() : 72;
+
+                                PrintHtml(printerName, html, widthInches, heightInches, dpiX, dpiY);
+
+                                WriteResponse(ctx,
+                                    "{\"status\":\"html sent to printer\"}",
+                                    "application/json");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[ERROR] print-html: {ex.Message}");
+                            WriteResponse(ctx,
+                                $"{{\"error\":\"{ex.Message}\"}}",
+                                "application/json");
+                        }
+                    }
+                }
+                else if (path == "/status" && method == "POST")
+                {
+                    using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
+                    {
+                        var body = reader.ReadToEnd();
+
+                        try
+                        {
+                            using (JsonDocument jsonDoc = JsonDocument.Parse(body))
+                            {
+                                var root = jsonDoc.RootElement;
+
+                                if (!root.TryGetProperty("printer", out var printerElement))
+                                {
+                                    WriteResponse(ctx, "{\"error\":\"Missing printer name\"}", "application/json");
+                                    return;
+                                }
+
+                                var printerName = printerElement.GetString();
+                                string status = GetPrinterStatus(printerName);
+
+                                WriteResponse(ctx, $"{{\"status\":\"{status}\"}}", "application/json");
                             }
                         }
                         catch (Exception ex)
@@ -174,198 +341,644 @@ namespace RawPrint
                         }
                     }
                 }
-                else if (ctx.Request.Url.AbsolutePath == "/print-pdf" && ctx.Request.HttpMethod == "POST")
-                {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
-                    {
-                        var body = reader.ReadToEnd();
-                        var doc = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-
-                        if (!doc.ContainsKey("printer") || !doc.ContainsKey("pdf"))
-                        {
-                            WriteResponse(ctx, "{\"error\":\"Missing printer or pdf data\"}", "application/json");
-                            return;
-                        }
-
-                        var printerName = doc["printer"];
-                        var pdfBase64 = doc["pdf"];
-
-                        try
-                        {
-                            byte[] pdfBytes = Convert.FromBase64String(pdfBase64);
-                            PrintPdf(printerName, pdfBytes);
-                            WriteResponse(ctx, "{\"status\":\"pdf sent to printer\"}", "application/json");
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
-                        }
-                    }
-                }
-                else if (ctx.Request.Url.AbsolutePath == "/status" && ctx.Request.HttpMethod == "POST")
+                else if (path == "/test" && method == "POST")
                 {
                     using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
                     {
                         var body = reader.ReadToEnd();
-                        var doc = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-
-                        if (!doc.ContainsKey("printer"))
-                        {
-                            WriteResponse(ctx, "{\"error\":\"Missing printer name\"}", "application/json");
-                            return;
-                        }
-
-                        var printerName = doc["printer"];
-                        string status = GetPrinterStatus(printerName);
-
-                        WriteResponse(ctx, $"{{\"status\":\"{status}\"}}", "application/json");
-                    }
-                }
-                else if (ctx.Request.Url.AbsolutePath == "/test" && ctx.Request.HttpMethod == "POST")
-                {
-                    using (var reader = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding))
-                    {
-                        var body = reader.ReadToEnd();
-                        var doc = JsonSerializer.Deserialize<Dictionary<string, string>>(body);
-
-                        if (!doc.ContainsKey("printer"))
-                        {
-                            WriteResponse(ctx, "{\"error\":\"Missing printer name\"}", "application/json");
-                            return;
-                        }
-
-                        var printerName = doc["printer"];
 
                         try
                         {
-                            string result = PrintTestPage(printerName);
-
-                            var json = JsonSerializer.Serialize(new
+                            using (JsonDocument jsonDoc = JsonDocument.Parse(body))
                             {
-                                status = "ok",
-                                message = result
-                            });
+                                var root = jsonDoc.RootElement;
 
-                            WriteResponse(ctx, json, "application/json");
+                                if (!root.TryGetProperty("printer", out var printerElement))
+                                {
+                                    WriteResponse(ctx, "{\"error\":\"Missing printer name\"}", "application/json");
+                                    return;
+                                }
+
+                                var printerName = printerElement.GetString();
+                                string result = PrintTestPage(printerName);
+
+                                var json = JsonSerializer.Serialize(new { status = "ok", message = result });
+                                WriteResponse(ctx, json, "application/json");
+                            }
                         }
                         catch (Exception ex)
                         {
-                            var json = JsonSerializer.Serialize(new
-                            {
-                                error = ex.Message
-                            });
+                            var json = JsonSerializer.Serialize(new { error = ex.Message });
                             WriteResponse(ctx, json, "application/json");
                         }
                     }
                 }
-
                 else
                 {
+                    // Show exactly what path was not found
+                    Console.WriteLine($"[NOT FOUND] {method} {path}");
                     ctx.Response.StatusCode = 404;
-                    WriteResponse(ctx, "{\"error\":\"Not Found\"}", "application/json");
+                    WriteResponse(ctx, $"{{\"error\":\"Not Found\", \"path\":\"{path}\", \"method\":\"{method}\"}}", "application/json");
                 }
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"[ERROR] {ex.Message}");
                 WriteResponse(ctx, $"{{\"error\":\"{ex.Message}\"}}", "application/json");
             }
             finally
             {
                 ctx.Response.OutputStream.Close();
             }
-        }
+        }        // ---------- IMAGE PRINTING ----------
 
-        // ---------- IMAGE PRINTING ----------
-        private void PrintImage(string printerName, Image image, bool fitToPage)
+        private void PrintImage(string printerName, Image image, bool fitToPage, float widthInches = 0, float heightInches = 0)
         {
             PrintDocument pd = new PrintDocument();
             pd.PrinterSettings.PrinterName = printerName;
 
+            // Remove all margins
+            pd.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
+
+            // If custom size provided, set paper size
+            if (widthInches > 0 && heightInches > 0)
+            {
+                // Convert inches to hundredths of an inch (printer units)
+                int paperWidth = (int)(widthInches * 100);
+                int paperHeight = (int)(heightInches * 100);
+
+                pd.DefaultPageSettings.PaperSize = new PaperSize("Custom", paperWidth, paperHeight);
+            }
+
             pd.PrintPage += (sender, e) =>
             {
+                // Use inches instead of pixels
+                e.Graphics.PageUnit = GraphicsUnit.Inch;
+
                 if (fitToPage)
                 {
-                    // Scale image to fit page while maintaining aspect ratio
-                    float pageWidth = e.MarginBounds.Width;
-                    float pageHeight = e.MarginBounds.Height;
-                    float imageWidth = image.Width;
-                    float imageHeight = image.Height;
+                    RectangleF area = new RectangleF(
+                        0,
+                        0,
+                        e.PageBounds.Width / 100f,
+                        e.PageBounds.Height / 100f
+                    );
 
-                    float scaleX = pageWidth / imageWidth;
-                    float scaleY = pageHeight / imageHeight;
-                    float scale = Math.Min(scaleX, scaleY);
-
-                    float scaledWidth = imageWidth * scale;
-                    float scaledHeight = imageHeight * scale;
-
-                    float x = e.MarginBounds.Left + (pageWidth - scaledWidth) / 2;
-                    float y = e.MarginBounds.Top + (pageHeight - scaledHeight) / 2;
-
-                    e.Graphics.DrawImage(image, x, y, scaledWidth, scaledHeight);
+                    e.Graphics.DrawImage(image, area);
                 }
                 else
                 {
-                    // Print at actual size
-                    e.Graphics.DrawImage(image, e.MarginBounds.Left, e.MarginBounds.Top);
+                    // Draw EXACT physical size in inches
+                    RectangleF exactSize = new RectangleF(
+                        0,
+                        0,
+                        widthInches,
+                        heightInches
+                    );
+
+                    e.Graphics.DrawImage(image, exactSize);
                 }
             };
+
 
             pd.Print();
         }
 
         // ---------- PDF PRINTING ----------
-        private void PrintPdf(string printerName, byte[] pdfBytes)
+        // private void PrintPdf(string printerName, byte[] pdfBytes)
+        // {
+        //     // Save PDF to temp file
+        //     string tempPdfPath = Path.Combine(Path.GetTempPath(), $"print_{Guid.NewGuid()}.pdf");
+        //     File.WriteAllBytes(tempPdfPath, pdfBytes);
+
+        //     try
+        //     {
+        //         // Use Adobe Reader or default PDF viewer to print
+        //         ProcessStartInfo psi = new ProcessStartInfo
+        //         {
+        //             FileName = tempPdfPath,
+        //             Verb = "print",
+        //             Arguments = $"/p /h \"{tempPdfPath}\"",
+        //             CreateNoWindow = true,
+        //             WindowStyle = ProcessWindowStyle.Hidden,
+        //             UseShellExecute = true
+        //         };
+
+        //         // Alternative: Use SumatraPDF if installed (more reliable)
+        //         string sumatraPath = @"C:\Program Files\SumatraPDF\SumatraPDF.exe";
+        //         if (File.Exists(sumatraPath))
+        //         {
+        //             psi.FileName = sumatraPath;
+        //             psi.Arguments = $"-print-to \"{printerName}\" \"{tempPdfPath}\"";
+        //             psi.UseShellExecute = false;
+        //         }
+
+        //         using (Process p = Process.Start(psi))
+        //         {
+        //             if (p != null && !p.HasExited)
+        //             {
+        //                 p.WaitForExit(10000); // Wait up to 10 seconds
+        //             }
+        //         }
+
+        //         // Wait a bit before deleting temp file
+        //         Thread.Sleep(2000);
+        //     }
+        //     finally
+        //     {
+        //         // Clean up temp file
+        //         try
+        //         {
+        //             if (File.Exists(tempPdfPath))
+        //                 File.Delete(tempPdfPath);
+        //         }
+        //         catch { }
+        //     }
+        // }
+
+        // private void PrintPdf(string printerName, byte[] pdfBytes)
+        // {
+        //     string tempPdfPath = Path.Combine(
+        //         Path.GetTempPath(),
+        //         $"print_{Guid.NewGuid()}.pdf"
+        //     );
+
+        //     File.WriteAllBytes(tempPdfPath, pdfBytes);
+
+        //     try
+        //     {
+        //         string sumatraPath = @"C:\SumatraPDF\SumatraPDF.exe";
+
+        //         if (!File.Exists(sumatraPath))
+        //             throw new Exception("SumatraPDF not found.");
+
+        //         ProcessStartInfo psi = new ProcessStartInfo
+        //         {
+        //             FileName = sumatraPath,
+        //             Arguments = $"-print-to \"{printerName}\" -silent \"{tempPdfPath}\"",
+        //             UseShellExecute = false,
+        //             CreateNoWindow = true,
+        //             WindowStyle = ProcessWindowStyle.Hidden
+        //         };
+
+        //         using (Process p = Process.Start(psi))
+        //         {
+        //             p?.WaitForExit(15000);
+        //         }
+
+        //         Thread.Sleep(1000);
+        //     }
+        //     finally
+        //     {
+        //         try
+        //         {
+        //             if (File.Exists(tempPdfPath))
+        //                 File.Delete(tempPdfPath);
+        //         }
+        //         catch { }
+        //     }
+        // }
+
+        private void PrintPdf(string printerName, string pdfPath)
         {
-            // Save PDF to temp file
-            string tempPdfPath = Path.Combine(Path.GetTempPath(), $"print_{Guid.NewGuid()}.pdf");
-            File.WriteAllBytes(tempPdfPath, pdfBytes);
+            string sumatraPath = @"C:\SumatraPDF\SumatraPDF.exe";
 
-            try
+            ProcessStartInfo psi = new ProcessStartInfo
             {
-                // Use Adobe Reader or default PDF viewer to print
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = tempPdfPath,
-                    Verb = "print",
-                    Arguments = $"/p /h \"{tempPdfPath}\"",
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    UseShellExecute = true
-                };
+                FileName = sumatraPath,
+                Arguments = $"-print-to \"{printerName}\" \"{pdfPath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = false
+            };
 
-                // Alternative: Use SumatraPDF if installed (more reliable)
-                string sumatraPath = @"C:\Program Files\SumatraPDF\SumatraPDF.exe";
-                if (File.Exists(sumatraPath))
-                {
-                    psi.FileName = sumatraPath;
-                    psi.Arguments = $"-print-to \"{printerName}\" \"{tempPdfPath}\"";
-                    psi.UseShellExecute = false;
-                }
-
-                using (Process p = Process.Start(psi))
-                {
-                    if (p != null && !p.HasExited)
-                    {
-                        p.WaitForExit(10000); // Wait up to 10 seconds
-                    }
-                }
-
-                // Wait a bit before deleting temp file
-                Thread.Sleep(2000);
-            }
-            finally
+            using (Process p = Process.Start(psi))
             {
-                // Clean up temp file
-                try
-                {
-                    if (File.Exists(tempPdfPath))
-                        File.Delete(tempPdfPath);
-                }
-                catch { }
+                p?.WaitForExit(15000);
             }
         }
 
+        // private void PrintHtml(string printerName, string html)
+        // {
+        //     var thread = new Thread(() =>
+        //     {
+        //         var form = new Form();
+        //         form.WindowState = FormWindowState.Minimized;
+        //         form.ShowInTaskbar = false;
+
+        //         var webView = new WebView2();
+        //         webView.Dock = DockStyle.Fill;
+        //         form.Controls.Add(webView);
+
+        //         form.Load += async (s, e) =>
+        //         {
+        //             await webView.EnsureCoreWebView2Async();
+
+        //             webView.NavigateToString(html);
+
+        //             webView.CoreWebView2.NavigationCompleted += async (sender, args) =>
+        //             {
+        //                 var settings = webView.CoreWebView2.Environment.CreatePrintSettings();
+        //                 settings.ShouldPrintBackgrounds = true;
+        //                 settings.PrinterName = printerName;
+
+        //                 await webView.CoreWebView2.PrintAsync(settings);
+
+        //                 form.Close();
+        //             };
+        //         };
+
+        //         Application.Run(form);
+        //     });
+
+        //     thread.SetApartmentState(ApartmentState.STA);
+        //     thread.Start();
+        //     thread.Join();
+        // }
+
+
         // Alternative PDF printing using GhostScript (requires GhostScript installed)
+
+        // private void PrintHtml(string printerName, string html, float widthInches = 8.5f, float heightInches = 5.5f)
+        // {
+        //     string tempPdfPath = Path.Combine(Path.GetTempPath(),
+        //         $"print_{Guid.NewGuid()}.pdf");
+
+        //     ManualResetEventSlim done = new ManualResetEventSlim(false);
+        //     Exception error = null;
+
+        //     var thread = new Thread(() =>
+        //     {
+        //         Form form = null;
+        //         WebView2 webView = null;
+
+        //         try
+        //         {
+        //             form = new Form();
+        //             form.WindowState = FormWindowState.Minimized;
+        //             form.ShowInTaskbar = false;
+
+        //             webView = new WebView2();
+        //             webView.Dock = DockStyle.Fill;
+        //             form.Controls.Add(webView);
+
+        //             form.Load += async (s, e) =>
+        //             {
+        //                 try
+        //                 {
+        //                     await webView.EnsureCoreWebView2Async();
+        //                     webView.NavigateToString(html);
+
+        //                     webView.CoreWebView2.NavigationCompleted += async (sender, args) =>
+        //                     {
+        //                         try
+        //                         {
+        //                             // Wait for full render
+        //                             await Task.Delay(800);
+
+        //                             // ✅ Create VECTOR PDF - same as Chrome print!
+        //                             var printSettings = webView.CoreWebView2
+        //                                 .Environment.CreatePrintSettings();
+
+        //                             printSettings.PageWidth = widthInches;
+        //                             printSettings.PageHeight = heightInches;
+        //                             printSettings.MarginTop = 0;
+        //                             printSettings.MarginBottom = 0;
+        //                             printSettings.MarginLeft = 0;
+        //                             printSettings.MarginRight = 0;
+        //                             printSettings.ScaleFactor = 1.0;
+        //                             printSettings.ShouldPrintBackgrounds = false;
+        //                             printSettings.ShouldPrintHeaderAndFooter = false;
+
+        //                             // This creates VECTOR PDF - text stays as text!
+        //                             await webView.CoreWebView2.PrintToPdfAsync(
+        //                                 tempPdfPath, printSettings);
+
+        //                             Console.WriteLine($"[INFO] Vector PDF created!");
+        //                         }
+        //                         catch (Exception ex)
+        //                         {
+        //                             error = ex;
+        //                         }
+        //                         finally
+        //                         {
+        //                             done.Set();
+        //                             form?.Invoke(new Action(() => form?.Close()));
+        //                         }
+        //                     };
+        //                 }
+        //                 catch (Exception ex)
+        //                 {
+        //                     error = ex;
+        //                     done.Set();
+        //                     form?.Close();
+        //                 }
+        //             };
+
+        //             Application.Run(form);
+        //         }
+        //         catch (Exception ex)
+        //         {
+        //             error = ex;
+        //             done.Set();
+        //         }
+        //     });
+
+        //     thread.SetApartmentState(ApartmentState.STA);
+        //     thread.Start();
+        //     done.Wait(TimeSpan.FromSeconds(30));
+        //     thread.Join(TimeSpan.FromSeconds(5));
+
+        //     if (error != null) throw error;
+        //     if (!File.Exists(tempPdfPath))
+        //         throw new Exception("PDF was not created");
+
+        //     // Print the vector PDF
+        //     try
+        //     {
+        //         PrintVectorPdf(printerName, tempPdfPath);
+        //     }
+        //     finally
+        //     {
+        //         Thread.Sleep(3000);
+        //         try { File.Delete(tempPdfPath); } catch { }
+        //     }
+        // }
+
+        private void PrintHtml(string printerName, string html,
+    float widthInches = 8.5f, float heightInches = 5.5f,
+    int dpiX = 240, int dpiY = 72)
+        {
+            string tempPdfPath = Path.Combine(Path.GetTempPath(),
+                $"print_{Guid.NewGuid()}.pdf");
+
+            ManualResetEventSlim done = new ManualResetEventSlim(false);
+            Exception error = null;
+
+            var thread = new Thread(() =>
+            {
+                Form form = null;
+                WebView2 webView = null;
+
+                try
+                {
+                    form = new Form();
+                    form.WindowState = FormWindowState.Minimized;
+                    form.ShowInTaskbar = false;
+
+                    webView = new WebView2();
+                    webView.Dock = DockStyle.Fill;
+                    form.Controls.Add(webView);
+
+                    form.Load += async (s, e) =>
+                    {
+                        try
+                        {
+                            await webView.EnsureCoreWebView2Async();
+                            webView.NavigateToString(html);
+
+                            webView.CoreWebView2.NavigationCompleted += async (sender, args) =>
+                            {
+                                try
+                                {
+                                    await Task.Delay(800);
+
+                                    var printSettings = webView.CoreWebView2
+                                        .Environment.CreatePrintSettings();
+
+                                    printSettings.PageWidth = widthInches;
+                                    printSettings.PageHeight = heightInches;
+                                    printSettings.MarginTop = 0;
+                                    printSettings.MarginBottom = 0;
+                                    printSettings.MarginLeft = 0;
+                                    printSettings.MarginRight = 0;
+                                    printSettings.ScaleFactor = 1.0;
+                                    printSettings.ShouldPrintBackgrounds = true;
+                                    printSettings.ShouldPrintHeaderAndFooter = false;
+
+                                    // Create vector PDF
+                                    await webView.CoreWebView2.PrintToPdfAsync(
+                                        tempPdfPath, printSettings);
+
+                                    Console.WriteLine($"[INFO] Vector PDF created: {tempPdfPath}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    error = ex;
+                                    Console.WriteLine($"[ERROR] PDF creation failed: {ex.Message}");
+                                }
+                                finally
+                                {
+                                    done.Set();
+                                    form?.Invoke(new Action(() => form?.Close()));
+                                }
+                            };
+                        }
+                        catch (Exception ex)
+                        {
+                            error = ex;
+                            done.Set();
+                            form?.Close();
+                        }
+                    };
+
+                    Application.Run(form);
+                }
+                catch (Exception ex)
+                {
+                    error = ex;
+                    done.Set();
+                }
+            });
+
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            done.Wait(TimeSpan.FromSeconds(30));
+            thread.Join(TimeSpan.FromSeconds(5));
+
+            if (error != null) throw error;
+            if (!File.Exists(tempPdfPath))
+                throw new Exception("PDF was not created");
+
+            try
+            {
+                PrintVectorPdf(printerName, tempPdfPath, dpiX, dpiY);
+            }
+            finally
+            {
+                Thread.Sleep(3000);
+                try { File.Delete(tempPdfPath); } catch { }
+            }
+        }
+
+        private void PrintVectorPdf(string printerName, string pdfPath,
+            int dpiX = 240, int dpiY = 72)
+        {
+            string gsPath = FindGhostScript();
+
+            if (gsPath == null)
+                throw new Exception(
+                    "GhostScript not found at " +
+                    "C:\\Program Files\\gs\\gs10.06.0\\bin\\gswin64c.exe");
+
+            Console.WriteLine($"[INFO] Printing via GhostScript ESC/P...");
+            Console.WriteLine($"[INFO] Printer : {printerName}");
+            Console.WriteLine($"[INFO] DPI     : {dpiX}x{dpiY}");
+            Console.WriteLine($"[INFO] PDF     : {pdfPath}");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = gsPath,
+                Arguments = $"-q -dNOPAUSE -dSAFER -dBATCH " +
+                           $"-sDEVICE=escp " +
+                           $"-r{dpiX}x{dpiY} " +
+                           $"-sOutputFile=\"%printer%{printerName}\" " +
+                           $"\"{pdfPath}\"",
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (var p = Process.Start(psi))
+            {
+                string output = p.StandardOutput.ReadToEnd();
+                string errors = p.StandardError.ReadToEnd();
+
+                p?.WaitForExit(30000);
+
+                if (!string.IsNullOrEmpty(output))
+                    Console.WriteLine($"[GS OUTPUT] {output}");
+                if (!string.IsNullOrEmpty(errors))
+                    Console.WriteLine($"[GS ERROR] {errors}");
+
+                Console.WriteLine($"[INFO] GhostScript exit code: {p.ExitCode}");
+            }
+
+            Console.WriteLine($"[INFO] Done printing to {printerName}");
+        }
+        private void PrintVectorPdf(string printerName, string pdfPath)
+        {
+            string gsPath = FindGhostScript();
+
+            if (gsPath == null)
+                throw new Exception("GhostScript not found at C:\\Program Files\\gs\\gs10.06.0\\bin\\gswin64c.exe");
+
+            Console.WriteLine($"[INFO] Printing via GhostScript ESC/P to {printerName}...");
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = gsPath,
+                Arguments = $"-q -dNOPAUSE -dSAFER -dBATCH " +
+                           $"-sDEVICE=escp " +          // ESC/P device for dot matrix
+                           $"-r240x144 " +               // 240x72 DPI (dot matrix standard)
+                           $"-sOutputFile=\"%printer%{printerName}\" " +
+                           $"\"{pdfPath}\"",
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using (var p = Process.Start(psi))
+            {
+                // Capture any errors
+                string output = p.StandardOutput.ReadToEnd();
+                string errors = p.StandardError.ReadToEnd();
+
+                p?.WaitForExit(30000);
+
+                if (!string.IsNullOrEmpty(output))
+                    Console.WriteLine($"[GS OUTPUT] {output}");
+                if (!string.IsNullOrEmpty(errors))
+                    Console.WriteLine($"[GS ERROR] {errors}");
+
+                Console.WriteLine($"[INFO] GhostScript exit code: {p.ExitCode}");
+            }
+
+            Console.WriteLine($"[INFO] Printed via GhostScript ESC/P to {printerName}!");
+        }
+        // private void PrintVectorPdf(string printerName, string pdfPath)
+        // {
+        //     // Try SumatraPDF first (best for dot matrix)
+        //     string[] sumatraPaths = { @"C:\SumatraPDF\SumatraPDF.exe" };
+
+        //     foreach (var path in sumatraPaths)
+        //     {
+        //         if (File.Exists(path))
+        //         {
+        //             Console.WriteLine("[INFO] Printing via SumatraPDF (vector)...");
+        //             var psi = new ProcessStartInfo
+        //             {
+        //                 FileName = path,
+        //                 // -print-settings "fit" ensures correct paper size
+        //                 Arguments = $"-print-to \"{printerName}\" -print-settings \"fit\" \"{pdfPath}\"",
+        //                 CreateNoWindow = true,
+        //                 WindowStyle = ProcessWindowStyle.Hidden,
+        //                 UseShellExecute = false
+        //             };
+        //             using (var p = Process.Start(psi))
+        //             {
+        //                 p?.WaitForExit(15000);
+        //             }
+        //             Console.WriteLine("[INFO] Printed via SumatraPDF!");
+        //             return;
+        //         }
+        //     }
+
+        //     // Try GhostScript
+        //     string gsPath = FindGhostScript();
+        //     if (gsPath != null)
+        //     {
+        //         Console.WriteLine("[INFO] Printing via GhostScript (vector)...");
+        //         var psi = new ProcessStartInfo
+        //         {
+        //             FileName = gsPath,
+        //             Arguments = $"-dPrinted -dBATCH -dNOPAUSE -dNOSAFER -q " +
+        //                        $"-dNumCopies=1 -sDEVICE=mswinpr2 " +
+        //                        $"-sOutputFile=\"%printer%{printerName}\" \"{pdfPath}\"",
+        //             CreateNoWindow = true,
+        //             WindowStyle = ProcessWindowStyle.Hidden,
+        //             UseShellExecute = false
+        //         };
+        //         using (var p = Process.Start(psi))
+        //         {
+        //             p?.WaitForExit(30000);
+        //         }
+        //         Console.WriteLine("[INFO] Printed via GhostScript!");
+        //         return;
+        //     }
+
+        //     throw new Exception(
+        //         "No PDF viewer found. Install SumatraPDF: " +
+        //         "https://www.sumatrapdfreader.org/");
+        // }
+
+        private string FindGhostScript()
+        {
+            string[] paths = new[]
+            {
+                // Your installed version - 64-bit console (recommended - no window popup)
+                @"C:\Program Files\gs\gs10.06.0\bin\gswin64c.exe",
+                
+                // Your installed version - 64-bit with window (fallback)
+                @"C:\Program Files\gs\gs10.06.0\bin\gswin64.exe",
+            };
+
+            foreach (var path in paths)
+            {
+                if (File.Exists(path))
+                {
+                    Console.WriteLine($"[INFO] GhostScript found: {path}");
+                    return path;
+                }
+            }
+
+            Console.WriteLine("[ERROR] GhostScript not found!");
+            return null;
+        }
+
         private void PrintPdfWithGhostScript(string printerName, byte[] pdfBytes)
         {
             string tempPdfPath = Path.Combine(Path.GetTempPath(), $"print_{Guid.NewGuid()}.pdf");
